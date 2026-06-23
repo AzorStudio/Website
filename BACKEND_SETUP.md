@@ -1,4 +1,4 @@
-# Obsidian Studios Website Backend Setup
+# Azor Studios Website Backend Setup
 
 This website uses **Node.js + MySQL** for accounts, sessions, admin dashboard, and download tracking.
 
@@ -112,7 +112,7 @@ SMTP_PORT=587
 SMTP_SECURE=false
 SMTP_USER=your_email_smtp_username
 SMTP_PASSWORD=your_email_smtp_password
-MAIL_FROM="Obsidian Studios <no-reply@yourdomain.com>"
+MAIL_FROM="Azor Studios <no-reply@yourdomain.com>"
 PUBLIC_URL=https://yourdomain.com
 ```
 

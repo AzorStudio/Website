@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const crypto = require('crypto');
 const argon2 = require('argon2');
 const mysql = require('mysql2/promise');
@@ -20,7 +21,7 @@ const isProduction = process.env.NODE_ENV === 'production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5500';
 const ALLOWED_ORIGINS = FRONTEND_URL.split(',').map((origin) => origin.trim()).filter(Boolean);
 const UPLOAD_DIR = path.join(__dirname, 'private_uploads');
-require('fs').mkdirSync(UPLOAD_DIR, { recursive: true });
+fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 const requiredEnv = ['DB_HOST', 'DB_PORT', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'SESSION_SECRET'];
 if (isProduction && !process.env.FRONTEND_URL) {
@@ -587,7 +588,7 @@ app.get('/api/products', async (req, res) => {
     sql += ' WHERE category = ?';
     params.push(category);
   }
-  sql += ' ORDER BY created_at DESC';
+  sql += ' ORDER BY products.created_at DESC';
   const [products] = await pool.execute(sql, params);
   res.json({ products });
 });
@@ -612,6 +613,50 @@ app.post('/api/admin/products', requireAdmin, upload.single('file'), async (req,
   res.json({ ok: true, id: result.insertId });
 });
 
+
+app.patch('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid product id.' });
+
+  const title = String(req.body.title || '').trim().slice(0, 120);
+  const category = String(req.body.category || '').trim();
+  const version = String(req.body.version || '1.0.0').trim().slice(0, 40);
+  const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
+  const description = String(req.body.description || '').trim().slice(0, 5000);
+
+  if (!title || !['plugins','setups','configs','skript','mods','resourcepacks'].includes(category) || !shortDescription) {
+    return res.status(400).json({ error: 'Title, category, and short description are required.' });
+  }
+
+  const [result] = await pool.execute(`
+    UPDATE products
+    SET title = ?, category = ?, version = ?, short_description = ?, description = ?
+    WHERE id = ?
+  `, [title, category, version, shortDescription, description, id]);
+
+  if (!result.affectedRows) return res.status(404).json({ error: 'Product not found.' });
+  await logActivity(req, req.user.id, 'edit_product', `${category}: ${title}`);
+  res.json({ ok: true });
+});
+
+app.delete('/api/admin/products/:id', requireAdmin, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ error: 'Invalid product id.' });
+
+  const [rows] = await pool.execute('SELECT * FROM products WHERE id = ? LIMIT 1', [id]);
+  const product = rows[0];
+  if (!product) return res.status(404).json({ error: 'Product not found.' });
+
+  await pool.execute('DELETE FROM products WHERE id = ?', [id]);
+  const filePath = path.join(UPLOAD_DIR, product.file_name);
+  if (fs.existsSync(filePath)) {
+    try { fs.unlinkSync(filePath); } catch (error) { console.warn('Could not delete uploaded file:', error.message); }
+  }
+
+  await logActivity(req, req.user.id, 'delete_product', `${product.category}: ${product.title}`);
+  res.json({ ok: true });
+});
+
 app.get('/api/admin/products', requireAdmin, async (req, res) => {
   const [products] = await pool.execute(`
     SELECT products.*, users.username AS uploader
@@ -626,14 +671,26 @@ app.get('/download/:id', async (req, res) => {
   const [rows] = await pool.execute('SELECT * FROM products WHERE id = ? LIMIT 1', [id]);
   const product = rows[0];
   if (!product) return res.status(404).send('File not found');
+
+  const filePath = path.join(UPLOAD_DIR, product.file_name);
+  if (!fs.existsSync(filePath)) {
+    console.error(`Download file missing for product ${product.id}: ${filePath}`);
+    return res.status(404).send('The uploaded file is missing on the server. Re-upload this project from the admin dashboard. For permanent storage on Railway, add a Volume or external storage.');
+  }
+
   const user = await getSessionUser(req);
   await pool.execute(`
     INSERT INTO downloads (user_id, item, type, product_id, ip, user_agent, created_at)
     VALUES (?, ?, ?, ?, ?, ?, ?)
   `, [user ? user.id : null, product.title, product.category, product.id, req.ip, req.get('user-agent') || '', nowDate()]);
   await logActivity(req, user ? user.id : null, 'download', `${product.category}: ${product.title}`);
-  const filePath = path.join(UPLOAD_DIR, product.file_name);
-  res.download(filePath, product.original_file_name);
+
+  res.download(filePath, product.original_file_name, (error) => {
+    if (error && !res.headersSent) {
+      console.error('Download failed:', error);
+      res.status(500).send('Download failed.');
+    }
+  });
 });
 
 app.get('/api/admin/users', requireAdmin, async (req, res) => {

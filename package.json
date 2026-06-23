@@ -1,8 +1,8 @@
 {
-  "name": "obsidian-studios-backend",
+  "name": "azor-studios-backend",
   "version": "1.0.0",
   "private": true,
-  "description": "Obsidian Studios backend API",
+  "description": "Azor Studios backend API",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
