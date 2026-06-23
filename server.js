@@ -571,7 +571,17 @@ app.get('/api/products', async (req, res) => {
   const category = String(req.query.category || '').trim();
   const allowed = ['plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks'];
   const params = [];
-  let sql = `SELECT products.id, title, slug, category, version, short_description, description, original_file_name, file_size, created_at, users.username AS uploader
+  let sql = `SELECT products.id,
+                    products.title,
+                    products.slug,
+                    products.category,
+                    products.version,
+                    products.short_description,
+                    products.description,
+                    products.original_file_name,
+                    products.file_size,
+                    products.created_at,
+                    users.username AS uploader
              FROM products LEFT JOIN users ON users.id = products.uploaded_by`;
   if (allowed.includes(category)) {
     sql += ' WHERE category = ?';
