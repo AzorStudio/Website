@@ -18,6 +18,7 @@ const SESSION_COOKIE = 'obs_session';
 const SESSION_DAYS = 7;
 const isProduction = process.env.NODE_ENV === 'production';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5500';
+const ALLOWED_ORIGINS = FRONTEND_URL.split(',').map((origin) => origin.trim()).filter(Boolean);
 const UPLOAD_DIR = path.join(__dirname, 'private_uploads');
 require('fs').mkdirSync(UPLOAD_DIR, { recursive: true });
 
@@ -127,7 +128,7 @@ async function initDatabase() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       title VARCHAR(120) NOT NULL,
       slug VARCHAR(140) NOT NULL UNIQUE,
-      category ENUM('plugins','mods','resourcepacks') NOT NULL,
+      category ENUM('plugins','setups','configs','skript','mods','resourcepacks') NOT NULL,
       version VARCHAR(40) NOT NULL,
       short_description VARCHAR(255) NOT NULL,
       description TEXT,
@@ -140,6 +141,12 @@ async function initDatabase() {
       CONSTRAINT fk_products_user FOREIGN KEY (uploaded_by) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+
+  try {
+    await pool.query("ALTER TABLE products MODIFY category ENUM('plugins','setups','configs','skript','mods','resourcepacks') NOT NULL");
+  } catch (error) {
+    console.warn('Could not update products category enum:', error.code || error.message);
+  }
 
   await pool.query(`
     CREATE TABLE IF NOT EXISTS downloads (
@@ -219,9 +226,7 @@ async function seedAdmin() {
   const username = process.env.ADMIN_USERNAME || 'Warrior_Playz';
   const password = process.env.ADMIN_PASSWORD || 'Admin123';
   const email = process.env.ADMIN_EMAIL || 'admin@obsidian.local';
-
-  const [rows] = await pool.execute('SELECT id FROM users WHERE username = ? LIMIT 1', [username]);
-  if (rows.length) return;
+  const forceReset = String(process.env.ADMIN_RESET_ON_START || 'false') === 'true';
 
   const passwordHash = await argon2.hash(password, {
     type: argon2.argon2id,
@@ -229,6 +234,23 @@ async function seedAdmin() {
     timeCost: 4,
     parallelism: 2
   });
+
+  const [rows] = await pool.execute('SELECT id, role FROM users WHERE username = ? LIMIT 1', [username]);
+  if (rows.length) {
+    const admin = rows[0];
+    if (forceReset) {
+      await pool.execute(
+        "UPDATE users SET password_hash = ?, role = 'admin', email = ?, avatar_url = ? WHERE id = ?",
+        [passwordHash, email, avatarUrl(username), admin.id]
+      );
+      await pool.execute('DELETE FROM sessions WHERE user_id = ?', [admin.id]);
+      console.log(`Admin account reset from environment: ${username}`);
+    } else if (admin.role !== 'admin') {
+      await pool.execute("UPDATE users SET role = 'admin' WHERE id = ?", [admin.id]);
+      console.log(`Promoted existing account to admin: ${username}`);
+    }
+    return;
+  }
 
   await pool.execute(`
     INSERT INTO users (username, email, password_hash, role, avatar_url, created_at)
@@ -298,7 +320,13 @@ app.disable('x-powered-by');
 app.set('trust proxy', 1);
 
 app.use(cors({
-  origin: FRONTEND_URL,
+  origin(origin, callback) {
+    // Allow same-origin/server-to-server/no-origin requests and configured frontend domains.
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked origin: ${origin}`));
+  },
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type']
@@ -462,7 +490,7 @@ app.post('/api/auth/forgot-password', authLimiter, async (req, res) => {
   const resetUrl = `${getBaseUrl(req)}/reset.html?token=${encodeURIComponent(rawToken)}`;
   const sent = await sendMail(
     user.email,
-    'Reset your Obsidian Studios password',
+    'Reset your Azor Studios password',
     `Hello ${user.username},\n\nUse this link to reset your password. It expires in 30 minutes:\n\n${resetUrl}\n\nIf you did not request this, ignore this email.\n`
   );
 
@@ -541,7 +569,7 @@ app.get('/api/profile/:username', (req, res) => {
 
 app.get('/api/products', async (req, res) => {
   const category = String(req.query.category || '').trim();
-  const allowed = ['plugins', 'mods', 'resourcepacks'];
+  const allowed = ['plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks'];
   const params = [];
   let sql = `SELECT products.id, title, slug, category, version, short_description, description, original_file_name, file_size, created_at, users.username AS uploader
              FROM products LEFT JOIN users ON users.id = products.uploaded_by`;
@@ -561,7 +589,7 @@ app.post('/api/admin/products', requireAdmin, upload.single('file'), async (req,
   const version = String(req.body.version || '1.0.0').trim().slice(0, 40);
   const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
   const description = String(req.body.description || '').trim().slice(0, 5000);
-  if (!title || !['plugins','mods','resourcepacks'].includes(category) || !shortDescription) {
+  if (!title || !['plugins','setups','configs','skript','mods','resourcepacks'].includes(category) || !shortDescription) {
     return res.status(400).json({ error: 'Title, category, and short description are required.' });
   }
   const baseSlug = slugify(title);
@@ -643,7 +671,7 @@ app.use((err, req, res, next) => {
   await ensurePasswordResetTable();
   await seedAdmin();
   app.listen(PORT, () => {
-    console.log(`Obsidian Studios website running on http://localhost:${PORT}`);
+    console.log(`Azor Studios website running on http://localhost:${PORT}`);
   });
 })().catch((error) => {
   console.error('Failed to start server:', error);
