@@ -153,7 +153,8 @@ async function initDatabase() {
     "ALTER TABLE products ADD COLUMN icon_file VARCHAR(255) NULL",
     "ALTER TABLE products ADD COLUMN author VARCHAR(120) NULL",
     "ALTER TABLE products ADD COLUMN updated_at DATETIME NULL",
-    "ALTER TABLE products ADD COLUMN categories TEXT NULL"
+    "ALTER TABLE products ADD COLUMN categories TEXT NULL",
+    "ALTER TABLE products ADD COLUMN license ENUM('open_source','proprietary') NOT NULL DEFAULT 'proprietary'"
   ]) {
     try { await pool.query(statement); } catch (error) { if (error.code !== 'ER_DUP_FIELDNAME') console.warn('Product migration warning:', error.code || error.message); }
   }
@@ -179,7 +180,9 @@ async function initDatabase() {
 
   for (const statement of [
     "ALTER TABLE plugin_versions ADD COLUMN loaders TEXT NULL",
-    "ALTER TABLE plugin_versions ADD COLUMN minecraft_versions TEXT NULL"
+    "ALTER TABLE plugin_versions ADD COLUMN minecraft_versions TEXT NULL",
+    "ALTER TABLE plugin_versions ADD COLUMN platforms TEXT NULL",
+    "ALTER TABLE plugin_versions ADD COLUMN environments TEXT NULL"
   ]) {
     try { await pool.query(statement); } catch (error) { if (error.code !== 'ER_DUP_FIELDNAME') console.warn('Version migration warning:', error.code || error.message); }
   }
@@ -639,10 +642,53 @@ app.get('/api/categories', async (req, res) => {
   res.json({ counts });
 });
 
+app.get('/api/filters', async (req, res) => {
+  const [rows] = await pool.execute(`SELECT minecraft_versions FROM plugin_versions WHERE minecraft_versions IS NOT NULL AND minecraft_versions != ''`);
+  const versionSet = new Set();
+  for (const row of rows) {
+    for (const v of splitCsv(row.minecraft_versions)) versionSet.add(v);
+  }
+  // Sort descending so newest versions show first, matching Modrinth's convention.
+  const versions = [...versionSet].sort((a, b) => {
+    const partsA = a.split('.').map(Number);
+    const partsB = b.split('.').map(Number);
+    for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+      const diff = (partsB[i] || 0) - (partsA[i] || 0);
+      if (diff) return diff;
+    }
+    return 0;
+  });
+  res.json({ versions });
+});
+
 app.get('/api/products', async (req, res) => {
   const type = String(req.query.category || '').trim();
   const allowed = ['plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks'];
+  const search = String(req.query.search || '').trim().slice(0, 120);
+  const loaderFilter = String(req.query.loader || '').trim().toLowerCase();
+  const platformFilter = String(req.query.platform || '').trim().toLowerCase();
+  const environmentFilter = String(req.query.environment || '').trim().toLowerCase();
+  const licenseFilter = String(req.query.license || '').trim().toLowerCase();
+  const mcVersionFilter = String(req.query.mcVersion || '').trim();
+  const sort = String(req.query.sort || 'newest').trim();
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const perPage = Math.min(50, Math.max(1, Number(req.query.perPage) || 20));
+
   const params = [];
+  const whereClauses = [];
+
+  if (allowed.includes(type)) {
+    whereClauses.push('products.category = ?');
+    params.push(type);
+  }
+  if (search) {
+    whereClauses.push('(products.title LIKE ? OR products.short_description LIKE ?)');
+    params.push(`%${search}%`, `%${search}%`);
+  }
+  if (licenseFilter === 'open_source' || licenseFilter === 'proprietary') {
+    whereClauses.push('products.license = ?');
+    params.push(licenseFilter);
+  }
 
   let sql = `SELECT products.id,
                     products.title,
@@ -654,31 +700,79 @@ app.get('/api/products', async (req, res) => {
                     products.description,
                     products.icon_file,
                     products.author,
+                    products.license,
                     products.created_at,
                     products.updated_at,
                     users.username AS uploader,
                     COALESCE(SUM(plugin_versions.downloads), 0) AS downloads,
                     COUNT(plugin_versions.id) AS versions,
                     GROUP_CONCAT(plugin_versions.loaders SEPARATOR ',') AS loaders_csv,
-                    GROUP_CONCAT(plugin_versions.minecraft_versions SEPARATOR ',') AS minecraft_versions_csv
+                    GROUP_CONCAT(plugin_versions.minecraft_versions SEPARATOR ',') AS minecraft_versions_csv,
+                    GROUP_CONCAT(plugin_versions.platforms SEPARATOR ',') AS platforms_csv,
+                    GROUP_CONCAT(plugin_versions.environments SEPARATOR ',') AS environments_csv
              FROM products
              LEFT JOIN users ON users.id = products.uploaded_by
              LEFT JOIN plugin_versions ON plugin_versions.product_id = products.id`;
 
-  if (allowed.includes(type)) {
-    sql += ' WHERE products.category = ?';
-    params.push(type);
+  if (whereClauses.length) {
+    sql += ' WHERE ' + whereClauses.join(' AND ');
   }
 
-  sql += ' GROUP BY products.id ORDER BY products.created_at DESC';
-  const [products] = await pool.execute(sql, params);
-  res.json({ products: products.map((product) => ({
-    ...product,
-    categories: splitCsv(product.categories),
-    loaders: splitCsv(product.loaders_csv),
-    minecraft_versions: splitCsv(product.minecraft_versions_csv),
-    icon_url: product.icon_file ? `${getBaseUrl(req)}/files/${product.icon_file}` : null
-  })) });
+  sql += ' GROUP BY products.id';
+
+  const havingClauses = [];
+  if (loaderFilter) {
+    // Anchor to comma boundaries so filtering for "paper" can't accidentally match a
+    // hypothetical loader value that merely contains "paper" as a substring.
+    havingClauses.push("CONCAT(',', LOWER(loaders_csv), ',') LIKE ?");
+    params.push(`%,${loaderFilter},%`);
+  }
+  if (platformFilter) {
+    havingClauses.push("CONCAT(',', LOWER(platforms_csv), ',') LIKE ?");
+    params.push(`%,${platformFilter},%`);
+  }
+  if (environmentFilter === 'client' || environmentFilter === 'server') {
+    havingClauses.push("CONCAT(',', LOWER(environments_csv), ',') LIKE ?");
+    params.push(`%,${environmentFilter},%`);
+  }
+  if (mcVersionFilter) {
+    // Same boundary fix: prevents "1.21.1" from matching "1.21.10", "1.21.11", etc.
+    havingClauses.push("CONCAT(',', minecraft_versions_csv, ',') LIKE ?");
+    params.push(`%,${mcVersionFilter},%`);
+  }
+  if (havingClauses.length) {
+    sql += ' HAVING ' + havingClauses.join(' AND ');
+  }
+
+  const sortMap = {
+    newest: 'products.created_at DESC',
+    oldest: 'products.created_at ASC',
+    downloads: 'downloads DESC',
+    name: 'products.title ASC'
+  };
+  sql += ` ORDER BY ${sortMap[sort] || sortMap.newest}`;
+
+  // Run the filtered query once to get the total count for pagination, then again with LIMIT/OFFSET.
+  const [allMatches] = await pool.execute(sql, params);
+  const total = allMatches.length;
+  const offset = (page - 1) * perPage;
+  const pageRows = allMatches.slice(offset, offset + perPage);
+
+  res.json({
+    products: pageRows.map((product) => ({
+      ...product,
+      categories: splitCsv(product.categories),
+      loaders: splitCsv(product.loaders_csv),
+      minecraft_versions: splitCsv(product.minecraft_versions_csv),
+      platforms: splitCsv(product.platforms_csv),
+      environments: splitCsv(product.environments_csv),
+      icon_url: product.icon_file ? `${getBaseUrl(req)}/files/${product.icon_file}` : null
+    })),
+    total,
+    page,
+    perPage,
+    totalPages: Math.max(1, Math.ceil(total / perPage))
+  });
 });
 
 app.get('/api/products/:id', async (req, res) => {
@@ -695,7 +789,7 @@ app.get('/api/products/:id', async (req, res) => {
   const product = rows[0];
   if (!product) return res.status(404).json({ error: 'Project not found.' });
   const [versions] = await pool.execute(`
-    SELECT id, version_name, minecraft_version, minecraft_versions, loaders, original_file_name, file_size, downloads, changelog, created_at
+    SELECT id, version_name, minecraft_version, minecraft_versions, loaders, platforms, environments, original_file_name, file_size, downloads, changelog, created_at
     FROM plugin_versions
     WHERE product_id = ?
     ORDER BY created_at DESC
@@ -709,7 +803,9 @@ app.get('/api/products/:id', async (req, res) => {
     versions: versions.map((version) => ({
       ...version,
       loaders: splitCsv(version.loaders),
-      minecraft_versions: splitCsv(version.minecraft_versions || version.minecraft_version)
+      minecraft_versions: splitCsv(version.minecraft_versions || version.minecraft_version),
+      platforms: splitCsv(version.platforms),
+      environments: splitCsv(version.environments)
     }))
   });
 });
@@ -726,6 +822,9 @@ app.post('/api/admin/products', requireAdmin, upload.fields([{ name: 'file', max
   const version = String(req.body.version || 'v1.0.0').trim().slice(0, 80);
   const minecraftVersions = csvString(req.body.minecraftVersions || req.body.minecraftVersion || '1.21.x');
   const loaders = csvString(req.body.loaders || '');
+  const platforms = csvString(req.body.platforms || '');
+  const environments = csvString(req.body.environments || 'server');
+  const license = String(req.body.license || 'proprietary').trim() === 'open_source' ? 'open_source' : 'proprietary';
   const changelog = String(req.body.changelog || '').trim().slice(0, 5000);
   const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
   const description = String(req.body.description || '').trim().slice(0, 5000);
@@ -739,14 +838,14 @@ app.post('/api/admin/products', requireAdmin, upload.fields([{ name: 'file', max
   const slug = slugify(title) + '-' + crypto.randomBytes(3).toString('hex');
   const createdAt = nowDate();
   const [result] = await pool.execute(`
-    INSERT INTO products (title, slug, category, categories, version, short_description, description, file_name, original_file_name, file_size, icon_file, author, uploaded_by, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [title, slug, type, categories, version, shortDescription, description, mainFile.filename, mainFile.originalname, mainFile.size, iconFile.filename, req.user.username, req.user.id, createdAt, createdAt]);
+    INSERT INTO products (title, slug, category, categories, version, short_description, description, file_name, original_file_name, file_size, icon_file, author, license, uploaded_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [title, slug, type, categories, version, shortDescription, description, mainFile.filename, mainFile.originalname, mainFile.size, iconFile.filename, req.user.username, license, req.user.id, createdAt, createdAt]);
 
   await pool.execute(`
-    INSERT INTO plugin_versions (product_id, version_name, minecraft_version, minecraft_versions, loaders, file_name, original_file_name, file_size, downloads, changelog, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-  `, [result.insertId, version, minecraftVersions.split(',')[0] || '1.21.x', minecraftVersions, loaders, mainFile.filename, mainFile.originalname, mainFile.size, changelog, createdAt]);
+    INSERT INTO plugin_versions (product_id, version_name, minecraft_version, minecraft_versions, loaders, platforms, environments, file_name, original_file_name, file_size, downloads, changelog, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `, [result.insertId, version, minecraftVersions.split(',')[0] || '1.21.x', minecraftVersions, loaders, platforms, environments, mainFile.filename, mainFile.originalname, mainFile.size, changelog, createdAt]);
 
   await logActivity(req, req.user.id, 'create_project', `${type}: ${title}`);
   res.json({ ok: true, id: result.insertId });
@@ -763,6 +862,9 @@ app.patch('/api/admin/products/:id', requireAdmin, async (req, res) => {
   const changelog = String(req.body.changelog || '').trim().slice(0, 5000);
   const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
   const description = String(req.body.description || '').trim().slice(0, 5000);
+  const license = req.body.license !== undefined
+    ? (String(req.body.license).trim() === 'open_source' ? 'open_source' : 'proprietary')
+    : null;
 
   if (!title || !['plugins','setups','configs','skript','mods','resourcepacks'].includes(category) || !shortDescription) {
     return res.status(400).json({ error: 'Title, category, and short description are required.' });
@@ -770,9 +872,9 @@ app.patch('/api/admin/products/:id', requireAdmin, async (req, res) => {
 
   const [result] = await pool.execute(`
     UPDATE products
-    SET title = ?, category = ?, version = ?, short_description = ?, description = ?
+    SET title = ?, category = ?, version = ?, short_description = ?, description = ?, license = COALESCE(?, license)
     WHERE id = ?
-  `, [title, category, version, shortDescription, description, id]);
+  `, [title, category, version, shortDescription, description, license, id]);
 
   if (!result.affectedRows) return res.status(404).json({ error: 'Product not found.' });
   await logActivity(req, req.user.id, 'edit_product', `${category}: ${title}`);
@@ -803,15 +905,17 @@ app.post('/api/admin/products/:id/versions', requireAdmin, upload.single('file')
   const versionName = String(req.body.versionName || req.body.version || 'v1.0.0').trim().slice(0, 80);
   const minecraftVersions = csvString(req.body.minecraftVersions || req.body.minecraftVersion || '1.21.x');
   const loaders = csvString(req.body.loaders || '');
+  const platforms = csvString(req.body.platforms || '');
+  const environments = csvString(req.body.environments || 'server');
   const changelog = String(req.body.changelog || '').trim().slice(0, 5000);
   if (!loaders) return res.status(400).json({ error: 'At least one loader is required.' });
   if (!minecraftVersions) return res.status(400).json({ error: 'At least one Minecraft version is required.' });
   const [productRows] = await pool.execute('SELECT id, title FROM products WHERE id = ? LIMIT 1', [productId]);
   if (!productRows[0]) return res.status(404).json({ error: 'Project not found.' });
   await pool.execute(`
-    INSERT INTO plugin_versions (product_id, version_name, minecraft_version, minecraft_versions, loaders, file_name, original_file_name, file_size, downloads, changelog, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
-  `, [productId, versionName, minecraftVersions.split(',')[0] || '1.21.x', minecraftVersions, loaders, req.file.filename, req.file.originalname, req.file.size, changelog, nowDate()]);
+    INSERT INTO plugin_versions (product_id, version_name, minecraft_version, minecraft_versions, loaders, platforms, environments, file_name, original_file_name, file_size, downloads, changelog, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `, [productId, versionName, minecraftVersions.split(',')[0] || '1.21.x', minecraftVersions, loaders, platforms, environments, req.file.filename, req.file.originalname, req.file.size, changelog, nowDate()]);
   await pool.execute('UPDATE products SET version = ?, updated_at = ? WHERE id = ?', [versionName, nowDate(), productId]);
   await logActivity(req, req.user.id, 'add_version', `${productRows[0].title}: ${versionName}`);
   res.json({ ok: true });
@@ -822,11 +926,13 @@ app.patch('/api/admin/versions/:id', requireAdmin, async (req, res) => {
   const versionName = String(req.body.versionName || 'v1.0.0').trim().slice(0, 80);
   const minecraftVersions = csvString(req.body.minecraftVersions || '1.21.x');
   const loaders = csvString(req.body.loaders || '');
+  const platforms = csvString(req.body.platforms || '');
+  const environments = csvString(req.body.environments || 'server');
   const changelog = String(req.body.changelog || '').trim().slice(0, 5000);
   if (!loaders || !minecraftVersions) return res.status(400).json({ error: 'Loaders and Minecraft versions are required.' });
   const [result] = await pool.execute(`
-    UPDATE plugin_versions SET version_name = ?, minecraft_version = ?, minecraft_versions = ?, loaders = ?, changelog = ? WHERE id = ?
-  `, [versionName, minecraftVersions.split(',')[0] || '1.21.x', minecraftVersions, loaders, changelog, id]);
+    UPDATE plugin_versions SET version_name = ?, minecraft_version = ?, minecraft_versions = ?, loaders = ?, platforms = ?, environments = ?, changelog = ? WHERE id = ?
+  `, [versionName, minecraftVersions.split(',')[0] || '1.21.x', minecraftVersions, loaders, platforms, environments, changelog, id]);
   if (!result.affectedRows) return res.status(404).json({ error: 'Version not found.' });
   await logActivity(req, req.user.id, 'edit_version', versionName);
   res.json({ ok: true });
