@@ -149,6 +149,47 @@ async function initDatabase() {
     console.warn('Could not update products category enum:', error.code || error.message);
   }
 
+  for (const statement of [
+    "ALTER TABLE products ADD COLUMN icon_file VARCHAR(255) NULL",
+    "ALTER TABLE products ADD COLUMN author VARCHAR(120) NULL",
+    "ALTER TABLE products ADD COLUMN updated_at DATETIME NULL"
+  ]) {
+    try { await pool.query(statement); } catch (error) { if (error.code !== 'ER_DUP_FIELDNAME') console.warn('Product migration warning:', error.code || error.message); }
+  }
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS plugin_versions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      product_id INT NOT NULL,
+      version_name VARCHAR(80) NOT NULL,
+      minecraft_version VARCHAR(80) NOT NULL,
+      file_name VARCHAR(255) NOT NULL,
+      original_file_name VARCHAR(255) NOT NULL,
+      file_size BIGINT NOT NULL,
+      downloads INT NOT NULL DEFAULT 0,
+      changelog TEXT,
+      created_at DATETIME NOT NULL,
+      INDEX idx_versions_product (product_id),
+      CONSTRAINT fk_versions_product FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  try {
+    const [legacy] = await pool.query(`
+      SELECT products.* FROM products
+      LEFT JOIN plugin_versions ON plugin_versions.product_id = products.id
+      WHERE plugin_versions.id IS NULL
+    `);
+    for (const product of legacy) {
+      await pool.execute(`
+        INSERT INTO plugin_versions (product_id, version_name, minecraft_version, file_name, original_file_name, file_size, downloads, changelog, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, 0, '', ?)
+      `, [product.id, product.version || '1.0.0', '1.21.x', product.file_name, product.original_file_name, product.file_size, product.created_at || nowDate()]);
+    }
+  } catch (error) {
+    console.warn('Legacy version migration warning:', error.code || error.message);
+  }
+
   await pool.query(`
     CREATE TABLE IF NOT EXISTS downloads (
       id INT AUTO_INCREMENT PRIMARY KEY,
@@ -371,9 +412,10 @@ const upload = multer({
   }),
   limits: { fileSize: 100 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
-    const allowed = ['.jar', '.zip', '.mcpack'];
     const ext = path.extname(file.originalname).toLowerCase();
-    cb(null, allowed.includes(ext));
+    const fileAllowed = ['.jar', '.zip', '.mcpack'];
+    const imageAllowed = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
+    cb(null, fileAllowed.includes(ext) || imageAllowed.includes(ext));
   }
 });
 
@@ -568,6 +610,12 @@ app.get('/api/profile/:username', (req, res) => {
 });
 
 
+app.get('/api/categories', async (req, res) => {
+  const [rows] = await pool.execute(`SELECT category, COUNT(*) AS count FROM products GROUP BY category`);
+  const counts = Object.fromEntries(rows.map((row) => [row.category, Number(row.count)]));
+  res.json({ counts });
+});
+
 app.get('/api/products', async (req, res) => {
   const category = String(req.query.category || '').trim();
   const allowed = ['plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks'];
@@ -581,34 +629,85 @@ app.get('/api/products', async (req, res) => {
                     products.description,
                     products.original_file_name,
                     products.file_size,
+                    products.icon_file,
+                    products.author,
                     products.created_at,
-                    users.username AS uploader
-             FROM products LEFT JOIN users ON users.id = products.uploaded_by`;
+                    products.updated_at,
+                    users.username AS uploader,
+                    COALESCE(SUM(plugin_versions.downloads), 0) AS downloads,
+                    COUNT(plugin_versions.id) AS versions
+             FROM products
+             LEFT JOIN users ON users.id = products.uploaded_by
+             LEFT JOIN plugin_versions ON plugin_versions.product_id = products.id`;
   if (allowed.includes(category)) {
-    sql += ' WHERE category = ?';
+    sql += ' WHERE products.category = ?';
     params.push(category);
   }
-  sql += ' ORDER BY products.created_at DESC';
+  sql += ' GROUP BY products.id ORDER BY products.created_at DESC';
   const [products] = await pool.execute(sql, params);
-  res.json({ products });
+  res.json({ products: products.map((product) => ({
+    ...product,
+    icon_url: product.icon_file ? `${getBaseUrl(req)}/files/${product.icon_file}` : null
+  })) });
 });
 
-app.post('/api/admin/products', requireAdmin, upload.single('file'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'File is required. Allowed: .jar, .zip, .mcpack up to 100MB.' });
+app.get('/api/products/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const [rows] = await pool.execute(`
+    SELECT products.*, users.username AS uploader, COALESCE(SUM(plugin_versions.downloads), 0) AS downloads
+    FROM products
+    LEFT JOIN users ON users.id = products.uploaded_by
+    LEFT JOIN plugin_versions ON plugin_versions.product_id = products.id
+    WHERE products.id = ?
+    GROUP BY products.id
+    LIMIT 1
+  `, [id]);
+  const product = rows[0];
+  if (!product) return res.status(404).json({ error: 'Project not found.' });
+  const [versions] = await pool.execute(`
+    SELECT id, version_name, minecraft_version, original_file_name, file_size, downloads, changelog, created_at
+    FROM plugin_versions
+    WHERE product_id = ?
+    ORDER BY created_at DESC
+  `, [id]);
+  res.json({
+    product: {
+      ...product,
+      icon_url: product.icon_file ? `${getBaseUrl(req)}/files/${product.icon_file}` : null
+    },
+    versions
+  });
+});
+
+app.post('/api/admin/products', requireAdmin, upload.fields([{ name: 'file', maxCount: 1 }, { name: 'icon', maxCount: 1 }]), async (req, res) => {
+  const mainFile = req.files?.file?.[0];
+  const iconFile = req.files?.icon?.[0];
+  if (!mainFile) return res.status(400).json({ error: 'File is required. Allowed: .jar, .zip, .mcpack up to 100MB.' });
+
   const title = String(req.body.title || '').trim().slice(0, 120);
   const category = String(req.body.category || '').trim();
   const version = String(req.body.version || '1.0.0').trim().slice(0, 40);
+  const minecraftVersion = String(req.body.minecraftVersion || '1.21.x').trim().slice(0, 80);
+  const changelog = String(req.body.changelog || '').trim().slice(0, 5000);
   const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
   const description = String(req.body.description || '').trim().slice(0, 5000);
+
   if (!title || !['plugins','setups','configs','skript','mods','resourcepacks'].includes(category) || !shortDescription) {
     return res.status(400).json({ error: 'Title, category, and short description are required.' });
   }
-  const baseSlug = slugify(title);
-  const slug = baseSlug + '-' + crypto.randomBytes(3).toString('hex');
+
+  const slug = slugify(title) + '-' + crypto.randomBytes(3).toString('hex');
+  const createdAt = nowDate();
   const [result] = await pool.execute(`
-    INSERT INTO products (title, slug, category, version, short_description, description, file_name, original_file_name, file_size, uploaded_by, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [title, slug, category, version, shortDescription, description, req.file.filename, req.file.originalname, req.file.size, req.user.id, nowDate()]);
+    INSERT INTO products (title, slug, category, version, short_description, description, file_name, original_file_name, file_size, icon_file, author, uploaded_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [title, slug, category, version, shortDescription, description, mainFile.filename, mainFile.originalname, mainFile.size, iconFile ? iconFile.filename : null, req.user.username, req.user.id, createdAt, createdAt]);
+
+  await pool.execute(`
+    INSERT INTO plugin_versions (product_id, version_name, minecraft_version, file_name, original_file_name, file_size, downloads, changelog, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+  `, [result.insertId, version, minecraftVersion, mainFile.filename, mainFile.originalname, mainFile.size, changelog, createdAt]);
+
   await logActivity(req, req.user.id, 'upload', `${category}: ${title}`);
   res.json({ ok: true, id: result.insertId });
 });
@@ -621,6 +720,8 @@ app.patch('/api/admin/products/:id', requireAdmin, async (req, res) => {
   const title = String(req.body.title || '').trim().slice(0, 120);
   const category = String(req.body.category || '').trim();
   const version = String(req.body.version || '1.0.0').trim().slice(0, 40);
+  const minecraftVersion = String(req.body.minecraftVersion || '1.21.x').trim().slice(0, 80);
+  const changelog = String(req.body.changelog || '').trim().slice(0, 5000);
   const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
   const description = String(req.body.description || '').trim().slice(0, 5000);
 
@@ -666,11 +767,44 @@ app.get('/api/admin/products', requireAdmin, async (req, res) => {
   res.json({ products });
 });
 
+app.get('/files/:name', (req, res) => {
+  const safe = path.basename(req.params.name);
+  const filePath = path.join(UPLOAD_DIR, safe);
+  if (!fs.existsSync(filePath)) return res.status(404).send('File not found');
+  res.sendFile(filePath);
+});
+
+app.get('/download/version/:id', async (req, res) => {
+  const id = Number(req.params.id);
+  const [rows] = await pool.execute(`
+    SELECT plugin_versions.*, products.title, products.category
+    FROM plugin_versions
+    JOIN products ON products.id = plugin_versions.product_id
+    WHERE plugin_versions.id = ?
+    LIMIT 1
+  `, [id]);
+  const version = rows[0];
+  if (!version) return res.status(404).send('Version not found');
+  const filePath = path.join(UPLOAD_DIR, version.file_name);
+  if (!fs.existsSync(filePath)) return res.status(404).send('The uploaded version file is missing. Re-upload this version.');
+  const user = await getSessionUser(req);
+  await pool.execute('UPDATE plugin_versions SET downloads = downloads + 1 WHERE id = ?', [id]);
+  await pool.execute(`
+    INSERT INTO downloads (user_id, item, type, product_id, ip, user_agent, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `, [user ? user.id : null, version.title, version.category, version.product_id, req.ip, req.get('user-agent') || '', nowDate()]);
+  await logActivity(req, user ? user.id : null, 'download_version', `${version.category}: ${version.title} ${version.version_name}`);
+  res.download(filePath, version.original_file_name);
+});
+
 app.get('/download/:id', async (req, res) => {
   const id = Number(req.params.id);
   const [rows] = await pool.execute('SELECT * FROM products WHERE id = ? LIMIT 1', [id]);
   const product = rows[0];
   if (!product) return res.status(404).send('File not found');
+
+  const [versions] = await pool.execute('SELECT id FROM plugin_versions WHERE product_id = ? ORDER BY created_at DESC LIMIT 1', [product.id]);
+  if (versions[0]) return res.redirect(`/download/version/${versions[0].id}`);
 
   const filePath = path.join(UPLOAD_DIR, product.file_name);
   if (!fs.existsSync(filePath)) {
