@@ -19,15 +19,25 @@ async function createSession(req, res, user) {
     VALUES (?, ?, ?, ?, ?, ?)
   `, [user.id, tokenHash, req.ip, req.get('user-agent') || '', new Date(), expires]);
 
-  // Determine if origin is external (cross-site)
-  const origin = req.get('origin');
-  const isExternal = origin && !origin.includes('localhost') && !origin.includes('127.0.0.1');
-  const useSecure = isProduction || isExternal;
+  // GitHub Pages (azorstudio.github.io) -> Railway (website-production-d9c9.up.railway.app)
+  // This is a TRUE cross-site / third-party context.
+  // Modern Chrome/Firefox require partitioned cookies (CHIPS).
+  const origin = req.get('origin') || '';
+  const isCrossSite = origin && (
+    !origin.includes('localhost') &&
+    !origin.includes('127.0.0.1') &&
+    !origin.includes(req.get('host'))
+  );
+  
+  const useSecure = isProduction || isCrossSite || req.secure || req.get('x-forwarded-proto') === 'https';
 
+  // CHIPS / Partitioned cookies required for third-party
   res.cookie(SESSION_COOKIE, raw, {
     httpOnly: true,
     sameSite: useSecure ? 'none' : 'lax',
     secure: useSecure,
+    partitioned: useSecure, // <-- CRITICAL FIX: CHIPS
+    path: '/',
     maxAge: SESSION_DAYS * 24 * 60 * 60 * 1000
   });
 }
