@@ -19,10 +19,15 @@ async function createSession(req, res, user) {
     VALUES (?, ?, ?, ?, ?, ?)
   `, [user.id, tokenHash, req.ip, req.get('user-agent') || '', new Date(), expires]);
 
+  // Determine if origin is external (cross-site)
+  const origin = req.get('origin');
+  const isExternal = origin && !origin.includes('localhost') && !origin.includes('127.0.0.1');
+  const useSecure = isProduction || isExternal;
+
   res.cookie(SESSION_COOKIE, raw, {
     httpOnly: true,
-    sameSite: isProduction ? 'none' : 'lax',
-    secure: isProduction,
+    sameSite: useSecure ? 'none' : 'lax',
+    secure: useSecure,
     maxAge: SESSION_DAYS * 24 * 60 * 60 * 1000
   });
 }
