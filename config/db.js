@@ -147,6 +147,19 @@ async function initDatabase() {
       CONSTRAINT fk_downloads_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+
+  try {
+    const [columns] = await pool.query('SHOW COLUMNS FROM products');
+    const hasPremium = columns.some((col) => col.Field === 'is_premium');
+    if (!hasPremium) {
+      await pool.query('ALTER TABLE products ADD COLUMN is_premium TINYINT DEFAULT 0');
+      await pool.query('ALTER TABLE products ADD COLUMN price DECIMAL(10,2) NULL');
+      await pool.query('ALTER TABLE products ADD COLUMN purchase_url TEXT NULL');
+      console.log('Successfully updated products table for premium columns.');
+    }
+  } catch (error) {
+    console.error('Failed to run migration for premium columns:', error);
+  }
 }
 
 async function ensurePasswordResetTable() {

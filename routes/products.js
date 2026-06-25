@@ -48,7 +48,10 @@ router.get('/api/filters', async (req, res) => {
 
 router.get('/api/products', async (req, res) => {
   const type = String(req.query.category || '').trim();
-  const allowed = ['plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks'];
+  const allowed = [
+    'plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks',
+    'premium_plugins', 'premium_setups', 'premium_configs', 'premium_resourcepacks'
+  ];
   const search = String(req.query.search || '').trim().slice(0, 120);
   const loaderFilter = String(req.query.loader || '').trim().toLowerCase();
   const platformFilter = String(req.query.platform || '').trim().toLowerCase();
@@ -63,9 +66,21 @@ router.get('/api/products', async (req, res) => {
   const whereClauses = [];
 
   if (allowed.includes(type)) {
-    whereClauses.push('products.category = ?');
-    params.push(type);
+    if (type.startsWith('premium_')) {
+      const realCategory = type.replace('premium_', '');
+      whereClauses.push('products.category = ?');
+      params.push(realCategory);
+      whereClauses.push('products.is_premium = 1');
+    } else {
+      whereClauses.push('products.category = ?');
+      params.push(type);
+      whereClauses.push('products.is_premium = 0');
+    }
+  } else {
+    // If no category specified, exclude premium from main feed by default
+    whereClauses.push('products.is_premium = 0');
   }
+
   if (search) {
     whereClauses.push('(products.title LIKE ? OR products.short_description LIKE ?)');
     params.push(`%${search}%`, `%${search}%`);
@@ -86,6 +101,9 @@ router.get('/api/products', async (req, res) => {
                     products.icon_file,
                     products.author,
                     products.license,
+                    products.is_premium,
+                    products.price,
+                    products.purchase_url,
                     products.created_at,
                     products.updated_at,
                     users.username AS uploader,

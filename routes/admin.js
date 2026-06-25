@@ -45,6 +45,10 @@ router.post('/products', upload.fields([{ name: 'file', maxCount: 1 }, { name: '
   const shortDescription = String(req.body.shortDescription || '').trim().slice(0, 255);
   const description = String(req.body.description || '').trim().slice(0, 5000);
 
+  const isPremium = Number(req.body.isPremium || 0) === 1 ? 1 : 0;
+  const price = req.body.price ? Number(req.body.price) : null;
+  const purchaseUrl = req.body.purchaseUrl ? String(req.body.purchaseUrl).trim() : null;
+
   if (!title || !['plugins','setups','configs','skript','mods','resourcepacks'].includes(type) || !shortDescription) {
     return res.status(400).json({ error: 'Title, project type, and short description are required.' });
   }
@@ -54,9 +58,9 @@ router.post('/products', upload.fields([{ name: 'file', maxCount: 1 }, { name: '
   const slug = slugify(title) + '-' + crypto.randomBytes(3).toString('hex');
   const createdAt = nowDate();
   const [result] = await pool.execute(`
-    INSERT INTO products (title, slug, category, categories, version, short_description, description, file_name, original_file_name, file_size, icon_file, author, license, uploaded_by, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `, [title, slug, type, categories, version, shortDescription, description, mainFile.filename, mainFile.originalname, mainFile.size, iconFile.filename, req.user.username, license, req.user.id, createdAt, createdAt]);
+    INSERT INTO products (title, slug, category, categories, version, short_description, description, file_name, original_file_name, file_size, icon_file, author, license, is_premium, price, purchase_url, uploaded_by, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `, [title, slug, type, categories, version, shortDescription, description, mainFile.filename, mainFile.originalname, mainFile.size, iconFile.filename, req.user.username, license, isPremium, price, purchaseUrl, req.user.id, createdAt, createdAt]);
 
   await pool.execute(`
     INSERT INTO plugin_versions (product_id, version_name, minecraft_version, minecraft_versions, loaders, platforms, environments, file_name, original_file_name, file_size, downloads, changelog, created_at)
@@ -88,6 +92,19 @@ router.patch('/products/:id', upload.single('icon'), async (req, res) => {
     SET title = ?, category = ?, short_description = ?, description = ?, license = COALESCE(?, license)
   `;
   const params = [title, category, shortDescription, description, license];
+
+  if (req.body.isPremium !== undefined) {
+    sql += `, is_premium = ?`;
+    params.push(Number(req.body.isPremium) === 1 ? 1 : 0);
+  }
+  if (req.body.price !== undefined) {
+    sql += `, price = ?`;
+    params.push(req.body.price ? Number(req.body.price) : null);
+  }
+  if (req.body.purchaseUrl !== undefined) {
+    sql += `, purchase_url = ?`;
+    params.push(req.body.purchaseUrl ? String(req.body.purchaseUrl).trim() : null);
+  }
 
   if (req.file) {
     sql += `, icon_file = ?`;
