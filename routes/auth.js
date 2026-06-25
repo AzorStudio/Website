@@ -178,7 +178,15 @@ router.post('/logout', async (req, res) => {
   const user = await getSessionUser(req);
   if (token) await pool.execute('DELETE FROM sessions WHERE token_hash = ?', [sha256(token)]);
   if (user) await logActivity(req, user.id, 'logout', 'Logged out');
-  res.clearCookie(SESSION_COOKIE);
+
+  const origin = req.get('origin');
+  const isExternal = origin && !origin.includes('localhost') && !origin.includes('127.0.0.1');
+  const useSecure = process.env.NODE_ENV === 'production' || isExternal;
+
+  res.clearCookie(SESSION_COOKIE, {
+    sameSite: useSecure ? 'none' : 'lax',
+    secure: useSecure
+  });
   res.json({ ok: true });
 });
 
