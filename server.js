@@ -65,7 +65,7 @@ app.use(cookieParser());
 app.use(rateLimit({ windowMs: 60 * 1000, limit: 180, standardHeaders: true, legacyHeaders: false }));
 
 // Static files (public)
-app.use(express.static(__dirname, {
+app.use(express.static(path.join(__dirname, '..', 'frontend'), {
   dotfiles: 'ignore',
   etag: true,
   maxAge: isProduction ? '1h' : 0
