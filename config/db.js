@@ -178,6 +178,17 @@ async function ensurePasswordResetTable() {
       CONSTRAINT fk_password_resets_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
   `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS site_settings (
+      setting_key VARCHAR(60) PRIMARY KEY,
+      setting_value TEXT NOT NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+  `);
+
+  await pool.query(`
+    INSERT IGNORE INTO site_settings (setting_key, setting_value) VALUES ('active_theme', 'default')
+  `);
 }
 
 async function seedAdmin() {

@@ -21,6 +21,15 @@ router.get('/api/health', async (req, res) => {
   }
 });
 
+router.get('/api/theme', async (req, res) => {
+  try {
+    const [rows] = await pool.execute("SELECT setting_value FROM site_settings WHERE setting_key = 'active_theme' LIMIT 1");
+    res.json({ theme: rows[0] ? rows[0].setting_value : 'default' });
+  } catch (error) {
+    res.json({ theme: 'default' });
+  }
+});
+
 router.get('/api/categories', async (req, res) => {
   const [rows] = await pool.execute(`SELECT category, COUNT(*) AS count FROM products GROUP BY category`);
   const counts = Object.fromEntries(rows.map((row) => [row.category, Number(row.count)]));

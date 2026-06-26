@@ -17,6 +17,13 @@ const {
 // Protect all admin routes
 router.use(requireAdmin);
 
+router.post('/theme', async (req, res) => {
+  const theme = String(req.body.theme || 'default').trim();
+  await pool.execute("INSERT INTO site_settings (setting_key, setting_value) VALUES ('active_theme', ?) ON DUPLICATE KEY UPDATE setting_value = ?", [theme, theme]);
+  await logActivity(req, req.user.id, 'switch_theme', `Switched global website theme to ${theme}`);
+  res.json({ ok: true, theme });
+});
+
 router.get('/products', async (req, res) => {
   const [products] = await pool.execute(`
     SELECT products.*, users.username AS uploader
