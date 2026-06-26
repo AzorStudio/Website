@@ -50,7 +50,7 @@ router.get('/api/products', async (req, res) => {
   const type = String(req.query.category || '').trim();
   const allowed = [
     'plugins', 'setups', 'configs', 'skript', 'mods', 'resourcepacks',
-    'premium_plugins', 'premium_setups', 'premium_configs', 'premium_resourcepacks'
+    'premium_plugins', 'premium_setups', 'premium_configs', 'premium_resourcepacks', 'premium_skript'
   ];
   const search = String(req.query.search || '').trim().slice(0, 120);
   const loaderFilter = String(req.query.loader || '').trim().toLowerCase();
