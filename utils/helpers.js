@@ -32,7 +32,10 @@ function validEmail(email) {
 }
 
 function getBaseUrl(req) {
-  return process.env.PUBLIC_URL || `${req.protocol}://${req.get('host')}`;
+  if (process.env.PUBLIC_URL && !process.env.PUBLIC_URL.includes('your-backend')) {
+    return process.env.PUBLIC_URL.replace(/\/$/, '');
+  }
+  return `${req.protocol}://${req.get('host')}`;
 }
 
 function smtpConfigured() {
